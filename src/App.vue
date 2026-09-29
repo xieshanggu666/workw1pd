@@ -22,6 +22,7 @@
       <PropagationView v-else-if="tab==='prop'" />
       <CrisisView v-else-if="tab==='crisis'" />
       <WorkOrderView v-else-if="tab==='work'" />
+      <ReportsView v-else-if="tab==='report'" />
       <NotifyView v-else-if="tab==='notify'" />
     </main>
 
@@ -41,6 +42,7 @@ import AlertCenterView from '@/components/AlertCenterView.vue'
 import PropagationView from '@/components/PropagationView.vue'
 import CrisisView from '@/components/CrisisView.vue'
 import WorkOrderView from '@/components/WorkOrderView.vue'
+import ReportsView from '@/components/ReportsView.vue'
 import NotifyView from '@/components/NotifyView.vue'
 
 const store = usePubStore()
@@ -54,6 +56,7 @@ const tabs = [
   { key: 'prop', icon: '🕸', label: '传播路径', badge: () => store.stats.propOutbreak || 0 },
   { key: 'crisis', icon: '🛟', label: '危机处置' },
   { key: 'work', icon: '📋', label: '协同工单', badge: () => store.stats.workOpen || 0 },
+  { key: 'report', icon: '📝', label: '复盘报告', badge: () => store.stats.reportReviewing || 0 },
   { key: 'notify', icon: '🔔', label: '通知中心', badge: () => store.stats.notifyOpen || 0 }
 ]
 // 演示权限模型：admin 配置+操作 / ops 任务操作 / viewer 只读（服务端强制校验）

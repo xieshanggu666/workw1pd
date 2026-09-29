@@ -33,6 +33,9 @@
           <span v-if="c.prop_active" class="prop-badge" :class="{out:c.prop_outbreak}" @click="gotoProp(c)" title="查看关联的传播路径">
             🕸 传播路径 {{ c.prop_active }}{{ c.prop_outbreak ? ' · 🔥爆发 '+c.prop_outbreak : '' }}
           </span>
+          <span v-if="c.report" class="report-badge" :class="c.report.status" @click="gotoReport(c)" title="查看复盘报告">
+            📝 复盘报告 · {{ c.report.statusText }} v{{ c.report.current_version }}
+          </span>
           <span class="st" :class="c.status">{{ stText(c.status) }}</span>
           <button class="del" @click="del(c)">✕</button>
         </div>
@@ -109,8 +112,18 @@
             <div v-for="cl in review.closures" :key="cl.id" class="rv-closure" :class="{rolled: cl.rolled_back}">
               <b>{{ cl.rolled_back ? '↩︎ 结案已回滚' : '✔ 结案' }}</b>
               <span class="cl-sum">{{ cl.summary || '（无总结）' }}</span>
+              <span v-if="cl.report_id || (review.report && review.report.published_version)" class="cl-report">
+                📝 复盘报告已回写：{{ cl.report_title || review.report?.title }}（v{{ cl.report_version || review.report?.published_version }}）
+              </span>
               <em>{{ cl.closed_at }}<template v-if="cl.rolled_back"> · 回滚于 {{ cl.rolled_back_at }}{{ cl.rollback_note ? '：' + cl.rollback_note : '' }}</template></em>
             </div>
+          </div>
+
+          <!-- 复盘报告回写状态（统计口径同源） -->
+          <div v-if="review.report" class="rv-report" :class="review.report.status">
+            📝 复盘报告「{{ review.report.title }}」· {{ review.report.statusText }}
+            <template v-if="review.report.published_version"> · 已发布 v{{ review.report.published_version }}（审核：{{ review.report.reviewed_by }}）</template>
+            <button class="mini-link" @click="gotoReport(c)">前往报告 →</button>
           </div>
 
           <div v-if="c.status!=='closed'" class="close-box">
@@ -127,6 +140,7 @@
           <button class="ghost" @click="addStep(c)">＋ 记录处置</button>
           <button v-if="c.status==='monitoring'||c.status==='disposal'" class="prog" @click="advance(c)">推进处置</button>
           <button v-if="c.status!=='closed'" class="wo-btn" @click="splitWorkOrder(c)">📋 拆分工单</button>
+          <button v-if="c.report || isOps" class="report-btn" @click="gotoReport(c)">📝 {{ c.report ? '复盘报告' : '编制复盘' }}</button>
           <button class="ghost" @click="toggleReview(c)">{{ reviewId===c.id ? '收起回溯' : '🔍 回溯' }}</button>
           <button v-if="c.status!=='closed'" class="close" @click="toggleReview(c, true)">结案</button>
           <button v-else class="reopen" @click="reopen(c)">↩︎ 回滚结案</button>
@@ -137,9 +151,10 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { usePubStore } from '@/store/pub'
 const store = usePubStore()
+const isOps = computed(() => ['admin', 'ops'].includes(store.user.role))
 const showForm = ref(false)
 const form = ref({ title: '', level: 'orange', topic: '', keyword: '', linked_email: '', plan: '', analysis: '' })
 const reviewId = ref(null)
@@ -188,6 +203,12 @@ function splitWorkOrder(c) {
   store.woDraftCrisis = c.id
   store.tab = 'work'
 }
+// 跳转复盘报告页（已有报告直接打开，无报告则带危机预填建档）
+function gotoReport(c) {
+  store.reportOpenId = c.report ? c.report.id : null
+  store.reportDraftCrisis = c.report ? null : c.id
+  store.tab = 'report'
+}
 async function reopen(c) {
   const note = prompt(`回滚结案「${c.title}」：结案时联动解除的预警将恢复为未解除，事件重回处置流程。\n回滚说明（可留空）：`)
   if (note == null) return
@@ -228,6 +249,9 @@ textarea{resize:vertical;min-height:52px;}
 .wo-badge.open{background:#132a52;color:#bbdefb;border-color:rgba(66,165,245,.4);}
 .prop-badge{font-size:10px;padding:2px 8px;border-radius:6px;background:#0d2b28;color:#80cbc4;border:1px solid rgba(0,150,136,.3);cursor:pointer;}
 .prop-badge.out{background:#3a1a24;color:#ef9a9a;border-color:rgba(239,83,80,.45);}
+.report-badge{font-size:10px;padding:2px 8px;border-radius:6px;background:#1f1640;color:#ce93d8;border:1px solid rgba(149,117,205,.35);cursor:pointer;}
+.report-badge.published{background:#122e1c;color:#a5d6a7;border-color:rgba(102,187,106,.4);}
+.report-badge.reviewing{background:#3d2a07;color:#ffcc80;border-color:rgba(255,167,38,.4);}
 .st{font-size:11px;padding:2px 10px;border-radius:6px;}
 .st.monitoring{background:#37474f;color:#b0bec5;}.st.disposal{background:#b71c1c;color:#ffcdd2;}.st.closed{background:#1b5e20;color:#a5d6a7;}
 .del{background:none;border:none;color:#ef5350;font-size:15px;cursor:pointer;}
@@ -282,7 +306,11 @@ h5{margin:0 0 8px;color:#ffd54f;font-size:12px;}
 .rv-closure{background:#13233f;border-radius:7px;padding:6px 9px;font-size:11px;color:#dbe4f3;display:flex;flex-direction:column;gap:2px;border-left:3px solid #66bb6a;}
 .rv-closure.rolled{border-left-color:#ffb300;opacity:.85;}
 .rv-closure .cl-sum{color:#8ba2c8;font-size:10px;}
+.cl-report{font-size:10px;color:#ce93d8;background:#1d1440;border:1px solid rgba(149,117,205,.35);border-radius:5px;padding:2px 8px;align-self:flex-start;}
 .rv-closure em{color:#5b6f94;font-size:10px;font-style:normal;}
+.rv-report{display:flex;align-items:center;gap:8px;font-size:11px;color:#dbe4f3;background:#13233f;border-radius:7px;padding:7px 11px;margin-bottom:10px;border-left:3px solid #7e57c2;flex-wrap:wrap;}
+.rv-report.published{border-left-color:#66bb6a;}.rv-report.reviewing{border-left-color:#ffa726;}
+.mini-link{margin-left:auto;background:none;border:none;color:#90caf9;font-size:11px;cursor:pointer;text-decoration:underline;}
 .rv-none{color:#5b6f94;font-size:11px;text-align:center;padding:8px 0;}
 .close-box{border-top:1px dashed rgba(120,160,220,0.15);padding-top:10px;display:flex;flex-direction:column;gap:8px;}
 .close-box textarea{min-height:56px;}
@@ -292,6 +320,7 @@ h5{margin:0 0 8px;color:#ffd54f;font-size:12px;}
 .actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;}
 .prog{background:linear-gradient(135deg,#ef6c00,#e65100);border:none;color:#fff;font-weight:600;cursor:pointer;}
 .wo-btn{background:linear-gradient(135deg,#00897b,#00695c);border:none;color:#fff;font-weight:600;cursor:pointer;}
+.report-btn{background:linear-gradient(135deg,#7b1fa2,#4a148c);border:none;color:#fff;font-weight:600;cursor:pointer;}
 .close{background:linear-gradient(135deg,#2e7d32,#1b5e20);border:none;color:#fff;font-weight:600;cursor:pointer;}
 .reopen{background:linear-gradient(135deg,#f9a825,#f57f17);border:none;color:#fff;font-weight:600;cursor:pointer;}
 .none{color:#5b6f94;text-align:center;padding:40px;}

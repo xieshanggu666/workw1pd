@@ -32,6 +32,11 @@ import {
   attachAlert, detachAlert, addEdge, createPropWorkOrder, markDecline,
   deleteProp, bindPropHooks, onAlertEvent
 } from './propagate.js'
+import {
+  REPORT_STATUS, SECTIONS, listReports, getReport, reportSummary, crisisReportBrief,
+  createReport, renameReport, editSection, refreshSnapshot, submitReport,
+  approveReport, rejectReport, rollbackReport, deleteReportsOfCrisis, ensureSeedSnapshots
+} from './reports.js'
 
 const app = express()
 app.use(express.json({ limit: '5mb' })) // 大批量导入（上限 5000 条）
@@ -65,6 +70,9 @@ bindPropHooks({
 bindPipelineProp({ onAlertEvent })
 const seededProp = seedPropNotifyTasks()
 if (seededProp) console.log(`[PROP] 为存量爆发期传播路径生成 ${seededProp} 个通知任务`)
+// 复盘报告：为种子报告补齐聚合快照（预警/时间线/传播/工单/回执，幂等）
+const seededReportSnap = ensureSeedSnapshots()
+if (seededReportSnap) console.log(`[REPORT] 为 ${seededReportSnap} 份复盘报告补齐聚合快照`)
 
 // 危机列表（含来源规则、承接规则、未解除预警数、协同工单统计、时间线）
 function crisisList(withTimeline = false) {
@@ -80,6 +88,7 @@ function crisisList(withTimeline = false) {
       FROM crisis_alerts ca LEFT JOIN alerts al ON al.id=ca.alert_id
       WHERE ca.crisis_id=? ORDER BY ca.is_origin DESC, ca.alert_id`, c.id)
     const item = { ...c, rules }
+    item.report = crisisReportBrief(c.id) // 复盘报告状态（编制中/待审核/已发布 + 当前版本）
     if (withTimeline) item.timeline = q('SELECT * FROM crisis_timeline WHERE crisis_id=? ORDER BY id DESC', c.id)
     return item
   })
@@ -103,7 +112,10 @@ app.get('/api/state', (req, res) => {
     (SELECT COUNT(*) FROM work_orders WHERE status IN ('todo','doing','blocked')) workOpen,
     (SELECT COUNT(*) FROM work_orders WHERE status IN ('todo','doing') AND due_at IS NOT NULL AND due_at<?) workOverdue,
     (SELECT COUNT(*) FROM prop_paths WHERE stage='outbreak' AND status='active') propOutbreak,
-    (SELECT COUNT(*) FROM prop_paths WHERE status='active') propActive`, Date.now())
+    (SELECT COUNT(*) FROM prop_paths WHERE status='active') propActive,
+    (SELECT COUNT(*) FROM crisis_reports WHERE status='draft') reportDraft,
+    (SELECT COUNT(*) FROM crisis_reports WHERE status='reviewing') reportReviewing,
+    (SELECT COUNT(*) FROM crisis_reports WHERE status='published') reportPublished`, Date.now())
   // 热度趋势（近7时段）
   const nowH = new Date().getHours()
   const trend = []
@@ -411,8 +423,11 @@ app.get('/api/crisis/:id/review', (req, res) => {
     WHERE ca.crisis_id=? ORDER BY ca.is_origin DESC, ca.alert_id`, c.id)
   // 结案档案（含已回滚）：回溯面板展示结案/回滚历史
   const closures = q('SELECT * FROM crisis_closures WHERE crisis_id=? ORDER BY id DESC', c.id)
+  // 复盘报告回写状态（统计口径同源：已发布版本回写结案档案）
+  const reportRow = q1('SELECT id,title,status,current_version,published_version,reviewed_by,published_at FROM crisis_reports WHERE crisis_id=? ORDER BY id DESC LIMIT 1', c.id)
+  const report = reportRow ? { ...reportRow, statusText: REPORT_STATUS[reportRow.status] || reportRow.status } : null
   res.json({
-    crisis: c, timeline, events, rules, closures,
+    crisis: c, timeline, events, rules, closures, report,
     stats: {
       triggers: events.length,
       open,
@@ -483,6 +498,12 @@ app.post('/api/crisis/:id/reopen', (req, res) => {
         restored += Number(r.changes || 0)
       }
       run('UPDATE crisis_closures SET rolled_back=1, rolled_back_at=?, rollback_note=? WHERE id=?', ts, note, closure.id)
+      // 复盘报告回写随结案档案回滚一并撤销（已发布报告回到编制中，由报告模块独立管理）
+      if (closure.report_id) {
+        const rep = q1('SELECT status,title FROM crisis_reports WHERE id=?', closure.report_id)
+        run("UPDATE crisis_closures SET report_id=NULL, report_version=0, report_title='' WHERE id=?", closure.id)
+        if (rep) addTimeline(c.id, '复盘回滚', `结案档案回滚：已发布复盘报告「${rep.title}」的结案回写已撤销，报告保留可在复盘报告页查阅或回滚重编`, ts)
+      }
     }
     run('UPDATE crisis SET status=? WHERE id=?', backTo, c.id)
     addTimeline(c.id, '结案回滚',
@@ -502,6 +523,8 @@ app.delete('/api/crisis/:id', (req, res) => {
   run('UPDATE alert_events SET crisis_id=NULL WHERE crisis_id=?', req.params.id)
   run('DELETE FROM crisis_timeline WHERE crisis_id=?', req.params.id)
   run('DELETE FROM crisis_closures WHERE crisis_id=?', req.params.id)
+  // 复盘报告随事件删除（版本归档与操作留痕一并清理）
+  deleteReportsOfCrisis(+req.params.id)
   // 协同工单随事件删除（工单日志一并清理）
   const woIds = q('SELECT id FROM work_orders WHERE crisis_id=?', req.params.id).map((r) => r.id)
   for (const wid of woIds) run('DELETE FROM work_order_logs WHERE wo_id=?', wid)
@@ -853,6 +876,82 @@ app.get('/api/collect/runs', (req, res) => {
       limit: Math.min(200, +req.query.limit || 50)
     })
   })
+})
+
+// ===== 危机复盘报告 =====
+// 权限：viewer 只读 / ops 编制·分段保存·刷新快照·送审 / admin 同 ops 且可审核（通过/驳回）与版本回滚
+// 报告看板（状态/危机过滤 + 汇总 + 章节与状态字典）
+app.get('/api/reports', (req, res) => {
+  res.json({
+    items: listReports({
+      status: String(req.query.status || ''),
+      crisisId: req.query.crisis_id ? +req.query.crisis_id : null
+    }),
+    summary: reportSummary(),
+    dict: { status: REPORT_STATUS, sections: SECTIONS, roles: ROLE_TEXT },
+    actor: actorOf(req)
+  })
+})
+// 报告详情（含聚合快照、归档版本、操作留痕）
+app.get('/api/reports/:id', (req, res) => {
+  const r = getReport(+req.params.id)
+  if (!r) return res.status(404).json({ error: '复盘报告不存在' })
+  res.json({ report: r })
+})
+// 创建报告（一个危机一份；建档即冻结首版聚合快照）
+app.post('/api/reports', guard('ops'), (req, res) => {
+  const r = createReport(req.body, req.actor)
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 修改标题（编制中）
+app.put('/api/reports/:id', guard('ops'), (req, res) => {
+  const r = renameReport(+req.params.id, req.body, req.actor)
+  if (!r) return res.status(404).json({ error: '复盘报告不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 跨角色分段编制：保存单章节（记录章节最后编辑人）
+app.put('/api/reports/:id/sections/:section', guard('ops'), (req, res) => {
+  const r = editSection(+req.params.id, req.params.section, req.body?.content, req.actor)
+  if (!r) return res.status(404).json({ error: '复盘报告不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 手动刷新聚合快照（重新汇总预警/时间线/传播/工单/回执）
+app.post('/api/reports/:id/snapshot', guard('ops'), (req, res) => {
+  const r = refreshSnapshot(+req.params.id, req.actor)
+  if (!r) return res.status(404).json({ error: '复盘报告不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 提交审核（冻结快照 + 归档送审版本）
+app.post('/api/reports/:id/submit', guard('ops'), (req, res) => {
+  const r = submitReport(+req.params.id, req.body, req.actor)
+  if (!r) return res.status(404).json({ error: '复盘报告不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 审核通过并发布（归档发布版本 + 回写结案档案与统计口径，仅 admin）
+app.post('/api/reports/:id/approve', guard('admin'), (req, res) => {
+  const r = approveReport(+req.params.id, req.body, req.actor)
+  if (!r) return res.status(404).json({ error: '复盘报告不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 审核驳回（退回编制中，仅 admin）
+app.post('/api/reports/:id/reject', guard('admin'), (req, res) => {
+  const r = rejectReport(+req.params.id, req.body, req.actor)
+  if (!r) return res.status(404).json({ error: '复盘报告不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 版本回滚（恢复归档版本内容、回退编制中、再归档回滚版本，仅 admin）
+app.post('/api/reports/:id/rollback', guard('admin'), (req, res) => {
+  const r = rollbackReport(+req.params.id, req.body, req.actor)
+  if (!r) return res.status(404).json({ error: '复盘报告不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
 })
 
 const PORT = Number(process.env.PORT) || 4130

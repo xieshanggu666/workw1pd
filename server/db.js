@@ -354,6 +354,70 @@ CREATE TABLE IF NOT EXISTS prop_change_logs (
   time TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_prop_logs_path ON prop_change_logs (path_id, id);
+-- ===== 危机复盘报告 =====
+-- 报告主表：跨角色分段编制（各章节记录最后编辑人），状态机驱动编制/审核/发布；聚合数据以快照冻结
+CREATE TABLE IF NOT EXISTS crisis_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  crisis_id INTEGER NOT NULL,               -- 所属危机事件
+  title TEXT NOT NULL,                      -- 报告标题
+  status TEXT NOT NULL DEFAULT 'draft',     -- draft 编制中 / reviewing 待审核 / published 已发布
+  -- 编制章节（跨角色分段协同：每段记录最后编辑人与编辑时间，见 *_by/*_at）
+  overview TEXT NOT NULL DEFAULT '',        -- 事件概述
+  root_cause TEXT NOT NULL DEFAULT '',      -- 原因分析
+  timeline_summary TEXT NOT NULL DEFAULT '',-- 处置时间线复盘
+  response_eval TEXT NOT NULL DEFAULT '',   -- 响应与传播评估
+  lessons TEXT NOT NULL DEFAULT '',         -- 经验教训与改进措施
+  appendix TEXT NOT NULL DEFAULT '',        -- 附录与备注
+  overview_by TEXT NOT NULL DEFAULT '', overview_at TEXT,
+  root_cause_by TEXT NOT NULL DEFAULT '', root_cause_at TEXT,
+  timeline_summary_by TEXT NOT NULL DEFAULT '', timeline_summary_at TEXT,
+  response_eval_by TEXT NOT NULL DEFAULT '', response_eval_at TEXT,
+  lessons_by TEXT NOT NULL DEFAULT '', lessons_at TEXT,
+  appendix_by TEXT NOT NULL DEFAULT '', appendix_at TEXT,
+  -- 聚合快照：汇总预警/时间线/传播路径/工单/通知回执（提交/发布/手动刷新时冻结），JSON 结构见 reports.js
+  snapshot TEXT NOT NULL DEFAULT '{}',
+  snapshotted_at TEXT,
+  current_version INTEGER NOT NULL DEFAULT 0, -- 当前内容对应的版本号（归档版本计数）
+  published_version INTEGER NOT NULL DEFAULT 0, -- 已发布版本号（0=尚未发布）
+  created_by TEXT NOT NULL DEFAULT '',
+  submitted_by TEXT NOT NULL DEFAULT '',
+  submitted_at TEXT,
+  reviewed_by TEXT NOT NULL DEFAULT '',
+  reviewed_at TEXT,
+  published_at TEXT,
+  created TEXT NOT NULL,
+  updated TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_crisis_reports_crisis ON crisis_reports (crisis_id, id);
+CREATE INDEX IF NOT EXISTS idx_crisis_reports_status ON crisis_reports (status);
+-- 版本归档：提交审核/发布/回滚均生成不可变快照行，支撑版本对比与回滚
+CREATE TABLE IF NOT EXISTS crisis_report_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  report_id INTEGER NOT NULL,
+  version INTEGER NOT NULL,                 -- 报告内版本序号（从 1 递增）
+  kind TEXT NOT NULL DEFAULT 'submit',      -- submit 送审归档 / publish 发布归档 / rollback 回滚归档
+  status TEXT NOT NULL DEFAULT 'draft',     -- 归档时报告状态
+  title TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '{}',       -- 章节内容 JSON 快照
+  snapshot TEXT NOT NULL DEFAULT '{}',      -- 聚合数据 JSON 快照
+  operator TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  source_version INTEGER NOT NULL DEFAULT 0, -- 回滚归档时的来源版本号
+  created TEXT NOT NULL,
+  UNIQUE (report_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_report_versions_report ON crisis_report_versions (report_id, version);
+-- 报告操作留痕：编制/提交/审核通过/驳回/发布/回滚/刷新快照全程可溯（含操作人与职能角色）
+CREATE TABLE IF NOT EXISTS crisis_report_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  report_id INTEGER NOT NULL,
+  action TEXT NOT NULL,                      -- create/edit/submit/approve/reject/publish/rollback/snapshot
+  detail TEXT NOT NULL DEFAULT '',
+  operator TEXT NOT NULL DEFAULT '系统',
+  operator_role TEXT NOT NULL DEFAULT '',
+  time TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_report_logs_report ON crisis_report_logs (report_id, id);
 -- 注：posts.idem_key 索引在下方 ensureColumn 之后创建（旧库可能尚无该列，此处创建会导致启动失败）
 `)
 
@@ -399,6 +463,10 @@ ensureColumn('work_orders', 'prop_path_id', 'prop_path_id INTEGER')
 // 老库迁移：传播路径表爆发时间戳列（早期 TEXT 定义以建表语句为准，这里仅补缺失列）
 ensureColumn('prop_paths', 'outbreak_at', 'outbreak_at INTEGER')
 ensureColumn('prop_paths', 'last_outbreak_wo_at', 'last_outbreak_wo_at INTEGER')
+// 复盘报告回写结案档案：已发布报告 id/版本/标题（结案档案展示统计口径同源；结案回滚时撤销回写）
+ensureColumn('crisis_closures', 'report_id', 'report_id INTEGER')
+ensureColumn('crisis_closures', 'report_version', 'report_version INTEGER NOT NULL DEFAULT 0')
+ensureColumn('crisis_closures', 'report_title', "report_title TEXT NOT NULL DEFAULT ''")
 
 // 迁移：早期版本 import_job_items.idem_key 为全局唯一，跨任务内容去重时同名键会冲突，
 // 重建表去掉该唯一约束（保留 (job_id, seq) 唯一与普通索引）。
@@ -776,3 +844,69 @@ function seedProp() {
     .forEach(([act, det, t]) => li.run(p3, act, det, '系统', t))
 }
 seedProp()
+
+// 危机复盘报告种子（独立幂等：快照由服务启动时 ensureSeedSnapshots 从实时数据聚合补齐）
+function seedReports() {
+  const n = db.prepare('SELECT COUNT(*) c FROM crisis_reports').get().c
+  if (n > 0) return
+  const c1 = db.prepare("SELECT id FROM crisis WHERE title LIKE '%门店卫生%' ORDER BY id LIMIT 1").get()
+  const c3 = db.prepare("SELECT id FROM crisis WHERE title LIKE '%会员涨价%' ORDER BY id LIMIT 1").get()
+  if (!c1 || !c3) return
+  const now = new Date()
+  const ago = (m) => new Date(now.getTime() - m * 60000).toLocaleString('zh-CN')
+  // R1 已发布报告（c3 已结案事件）：含两个归档版本（送审 v1 + 发布 v2），回写结案档案
+  const tOv = ago(2880), tCause = ago(2860), tTl = ago(2855), tEval = ago(2850),
+    tLessons = ago(2845), tCreated = ago(2870), tSubmitted = ago(2850), tPublished = ago(2840)
+  const r1 = Number(db.prepare(`INSERT INTO crisis_reports
+    (crisis_id,title,status,overview,root_cause,timeline_summary,response_eval,lessons,appendix,
+     overview_by,overview_at,root_cause_by,root_cause_at,timeline_summary_by,timeline_summary_at,
+     response_eval_by,response_eval_at,lessons_by,lessons_at,appendix_by,appendix_at,
+     snapshot,snapshotted_at,current_version,published_version,created_by,submitted_by,submitted_at,reviewed_by,reviewed_at,published_at,created,updated)
+    VALUES (?,?, 'published', ?,?,?,?,?,?,
+      '张岚',?,'陈律',?,'李澈',?,'张岚',?,'李澈',?,'王观',?,
+      '{}',?,2,2,'李澈','李澈',?,'张岚',?,?,?,?)
+  `).run(
+    c3.id, '某视频平台会员涨价争议 · 危机复盘报告',
+    '会员涨价公告发布后，社交平台出现以中性偏负为主的讨论，焦点集中于性价比与内容质量；未出现大规模抵制与次生话题，事件整体可控。',
+    '直接原因为权益说明不充分、价格梯度单一；深层原因为会员价值感知与定价节奏缺少前置沟通，客服答疑口径准备滞后。',
+    '公告发布后 4 小时内进入处置：发布定价说明、上线会员权益升级方案、客服集中答疑；观察期一周，热度与负面占比同步回落，随后解除预警并结案。',
+    '首次响应在 4 小时内，未达到红色事件 2 小时标准但舆情烈度较低，处置节奏合理；传播以平台讨论为主，无 KOL 集中介入，风险窗口判断准确。',
+    '1) 调价类公告前 72 小时完成权益沟通物料与客服口径准备；2) 建立价格敏感度小样本调研机制；3) 对高等级会员提供差异化补偿；4) 将「性价比」关键词纳入日常监测。',
+    '附：近一周讨论量曲线、客服答疑 Top10 问题清单（见工单结果）。',
+    tOv, tCause, tTl, tEval, tLessons, tPublished,
+    tSubmitted, tPublished, tPublished, tCreated, tCreated, tPublished
+  ).lastInsertRowid)
+  db.prepare(`INSERT INTO crisis_report_versions (report_id,version,kind,status,title,content,snapshot,operator,note,source_version,created)
+    VALUES (?,?,'submit','reviewing',?,'{}','{}',?,?,0,?)`)
+    .run(r1, 1, '某视频平台会员涨价争议 · 危机复盘报告', '李澈', '首版送审', tSubmitted)
+  db.prepare(`INSERT INTO crisis_report_versions (report_id,version,kind,status,title,content,snapshot,operator,note,source_version,created)
+    VALUES (?,?,'publish','published',?,'{}','{}',?,?,0,?)`)
+    .run(r1, 2, '某视频平台会员涨价争议 · 危机复盘报告', '张岚', '审核通过：改进措施补充价格敏感度调研，同意发布', tPublished)
+  const log = db.prepare('INSERT INTO crisis_report_logs (report_id,action,detail,operator,operator_role,time) VALUES (?,?,?,?,?,?)')
+  log.run(r1, 'create', '为已结案事件补建复盘报告，进入编制', '李澈', 'ops', tCreated)
+  log.run(r1, 'submit', '提交审核（归档 v1）', '李澈', 'ops', tSubmitted)
+  log.run(r1, 'approve', '审核通过并发布（归档 v2），已回写结案档案', '张岚', 'admin', tPublished)
+  // 回写 c3 最近一次结案档案
+  db.prepare(`UPDATE crisis_closures SET report_id=?, report_version=2, report_title=?
+    WHERE id=(SELECT id FROM crisis_closures WHERE crisis_id=? ORDER BY id DESC LIMIT 1)`)
+    .run(r1, '某视频平台会员涨价争议 · 危机复盘报告', c3.id)
+
+  // R2 编制中报告（c1 红色处置中事件）：已完成部分章节，等待跨角色补全（法务/客服章节未编辑）
+  const t2Created = ago(120), t2Ov = ago(118), t2Eval = ago(60)
+  const r2 = Number(db.prepare(`INSERT INTO crisis_reports
+    (crisis_id,title,status,overview,root_cause,timeline_summary,response_eval,lessons,
+     overview_by,overview_at,response_eval_by,response_eval_at,
+     snapshot,snapshotted_at,current_version,published_version,created_by,created,updated)
+    VALUES (?,?,'draft',?,'',?,'','',
+      '张岚',?,'李澈',?,'{}',?,0,0,'张岚',?,?)
+  `).run(
+    c1.id, '某连锁品牌门店卫生事件 · 危机复盘报告（编制中）',
+    '暗访视频曝光某门店后厨操作不规范，经媒体首发后由头部美食 KOL 转发，话题进入爆发期，峰值热度 95，累计触达超 300 万。',
+    '待补：结合处置时间线梳理首次回应、门店关停、第三方复查各节点的得失（请运营/公关团队补全）。',
+    t2Ov, t2Eval, t2Ov, t2Created, t2Eval
+  ).lastInsertRowid)
+  log.run(r2, 'create', '为红色事件创建复盘报告，进入跨角色分段编制', '张岚', 'admin', t2Created)
+  log.run(r2, 'edit', '事件概述已由 张岚（管理员）保存', '张岚', 'admin', t2Ov)
+  log.run(r2, 'edit', '响应与传播评估已由 李澈（值班员）保存', '李澈', 'ops', t2Eval)
+}
+seedReports()

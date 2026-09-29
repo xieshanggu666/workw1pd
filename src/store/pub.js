@@ -21,6 +21,8 @@ export const usePubStore = defineStore('pub', {
     tab: 'dash',          // 当前页签（危机卡片可跳转协同工单）
     woDraftCrisis: null,  // 从危机卡片「拆分工单」带入的预填危机 id
     propCrisisFilter: null, // 从危机卡片跳转传播路径页带入的危机过滤
+    reportDraftCrisis: null, // 从危机卡片/回溯跳转复盘报告页：无报告时带危机预填建档
+    reportOpenId: null,      // 从危机卡片/回溯跳转复盘报告页：已有报告时自动展开详情
     toast: null
   }),
   actions: {
@@ -190,6 +192,48 @@ export const usePubStore = defineStore('pub', {
       const r = await api(`/prop/${id}/work-orders`, 'POST', wo)
       await this.load()
       this.msg(`已从传播路径拆分跨角色工单 #${r.id}`, 'success')
+      return r
+    },
+    // ===== 危机复盘报告 =====
+    async fetchReports(filter) { return await api('/reports', 'GET', null, filter) },
+    async fetchReport(id) { return (await api(`/reports/${id}`)).report },
+    async createReport(body) {
+      const r = await api('/reports', 'POST', body)
+      await this.load()
+      this.msg('复盘报告已创建，进入跨角色分段编制', 'success')
+      return r
+    },
+    async renameReport(id, title) { return await api(`/reports/${id}`, 'PUT', { title }) },
+    async saveReportSection(id, section, content) {
+      return await api(`/reports/${id}/sections/${section}`, 'PUT', { content })
+    },
+    async refreshReportSnapshot(id) {
+      const r = await api(`/reports/${id}/snapshot`, 'POST')
+      this.msg('聚合数据已刷新：预警 / 时间线 / 传播路径 / 工单 / 通知回执', 'success')
+      return r
+    },
+    async submitReport(id, note) {
+      const r = await api(`/reports/${id}/submit`, 'POST', { note })
+      await this.load()
+      this.msg(`报告已提交审核（送审版本 v${r.version} 已归档）`, 'success')
+      return r
+    },
+    async approveReport(id, note) {
+      const r = await api(`/reports/${id}/approve`, 'POST', { note })
+      await this.load()
+      this.msg(`报告已审核通过并发布（v${r.version}），结案档案与统计口径已回写`, 'success')
+      return r
+    },
+    async rejectReport(id, note) {
+      const r = await api(`/reports/${id}/reject`, 'POST', { note })
+      await this.load()
+      this.msg('报告已驳回，退回编制中', 'info')
+      return r
+    },
+    async rollbackReport(id, version, note) {
+      const r = await api(`/reports/${id}/rollback`, 'POST', { version, note })
+      await this.load()
+      this.msg(`已回滚至 v${r.targetVersion}（新归档 v${r.newVersion}），退回编制中`, 'success')
       return r
     }
   }
