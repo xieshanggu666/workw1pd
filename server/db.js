@@ -98,8 +98,72 @@ CREATE TABLE IF NOT EXISTS crisis_closures (
   closed_at TEXT NOT NULL,
   rolled_back INTEGER NOT NULL DEFAULT 0,
   rolled_back_at TEXT,
-  rollback_note TEXT NOT NULL DEFAULT ''
+  rollback_note TEXT NOT NULL DEFAULT '',
+  report_id INTEGER,                 -- 已审核归档的复盘报告（回写结案档案）
+  report_version INTEGER,           -- 归档报告版本号
+  report_status TEXT NOT NULL DEFAULT '' -- 复盘状态：approved/revision（空=尚未归档）
 );
+-- 危机复盘报告：跨角色编制、审核、版本归档与回滚；内容与汇总快照均按版本留痕
+CREATE TABLE IF NOT EXISTS crisis_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  crisis_id INTEGER NOT NULL,
+  closure_id INTEGER,                -- 发起复盘时对应的结案档案
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft', -- draft/in_review/changes_requested/rejected/approved/revision
+  sections_json TEXT NOT NULL DEFAULT '{}',
+  snapshot_json TEXT NOT NULL DEFAULT '{}', -- 最近一次汇总快照（预警/时间线/传播/工单/通知回执）
+  current_version INTEGER NOT NULL DEFAULT 0,
+  latest_version INTEGER NOT NULL DEFAULT 0,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_by_role TEXT NOT NULL DEFAULT '',
+  submitted_by TEXT NOT NULL DEFAULT '',
+  submitted_by_role TEXT NOT NULL DEFAULT '',
+  submitted_at TEXT,
+  reviewer TEXT NOT NULL DEFAULT '',
+  reviewer_role TEXT NOT NULL DEFAULT '',
+  review_reason TEXT NOT NULL DEFAULT '',
+  reviewed_at TEXT,
+  approved_by TEXT NOT NULL DEFAULT '',
+  approved_by_role TEXT NOT NULL DEFAULT '',
+  approved_at TEXT,
+  archived_by TEXT NOT NULL DEFAULT '',
+  archived_by_role TEXT NOT NULL DEFAULT '',
+  archived_at TEXT,
+  rollback_from_version INTEGER,
+  created TEXT NOT NULL,
+  updated TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_crisis_reports_crisis ON crisis_reports (crisis_id, id);
+CREATE INDEX IF NOT EXISTS idx_crisis_reports_status ON crisis_reports (status);
+-- 报告版本：提交、手动归档、审核通过、版本回滚均生成不可变版本
+CREATE TABLE IF NOT EXISTS crisis_report_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  report_id INTEGER NOT NULL,
+  version_no INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  change_note TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'manual', -- manual/submit/approve/rollback
+  sections_json TEXT NOT NULL DEFAULT '{}',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_by_role TEXT NOT NULL DEFAULT '',
+  created TEXT NOT NULL,
+  restored_at TEXT,
+  restored_by TEXT NOT NULL DEFAULT '',
+  UNIQUE (report_id, version_no)
+);
+CREATE INDEX IF NOT EXISTS idx_report_versions_report ON crisis_report_versions (report_id, version_no);
+-- 复盘报告全程留痕：跨角色编制、送审、驳回、审核归档、版本回滚
+CREATE TABLE IF NOT EXISTS crisis_report_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  report_id INTEGER NOT NULL,
+  action TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  operator TEXT NOT NULL DEFAULT '系统',
+  operator_role TEXT NOT NULL DEFAULT '',
+  time TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_report_logs_report ON crisis_report_logs (report_id, id);
 -- 通知渠道配置：webhook/邮件/短信/站内信，target 为推送地址（演示用模拟发送）
 CREATE TABLE IF NOT EXISTS notify_channels (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -399,6 +463,10 @@ ensureColumn('work_orders', 'prop_path_id', 'prop_path_id INTEGER')
 // 老库迁移：传播路径表爆发时间戳列（早期 TEXT 定义以建表语句为准，这里仅补缺失列）
 ensureColumn('prop_paths', 'outbreak_at', 'outbreak_at INTEGER')
 ensureColumn('prop_paths', 'last_outbreak_wo_at', 'last_outbreak_wo_at INTEGER')
+// 危机复盘报告：结案档案记录最新审核归档报告（统计口径与事件回溯用）
+ensureColumn('crisis_closures', 'report_id', 'report_id INTEGER')
+ensureColumn('crisis_closures', 'report_version', 'report_version INTEGER')
+ensureColumn('crisis_closures', 'report_status', "report_status TEXT NOT NULL DEFAULT ''")
 
 // 迁移：早期版本 import_job_items.idem_key 为全局唯一，跨任务内容去重时同名键会冲突，
 // 重建表去掉该唯一约束（保留 (job_id, seq) 唯一与普通索引）。

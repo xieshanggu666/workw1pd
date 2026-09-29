@@ -13,6 +13,8 @@
       <div class="stat wo"><span class="s-ic">📋</span><b>{{ s.workOpen ?? 0 }}</b><em>在办工单{{ s.workOverdue ? `（超时 ${s.workOverdue}）` : '' }}</em></div>
       <div class="stat prop"><span class="s-ic">🕸</span><b>{{ s.propActive ?? 0 }}</b><em>监测传播路径</em></div>
       <div class="stat prop-out"><span class="s-ic">🔥</span><b>{{ s.propOutbreak ?? 0 }}</b><em>爆发期路径</em></div>
+      <div class="stat report"><span class="s-ic">📚</span><b>{{ s.reportApproved ?? 0 }}</b><em>已归档复盘</em></div>
+      <div class="stat report-draft"><span class="s-ic">📝</span><b>{{ s.reportDrafts ?? 0 }}</b><em>复盘编制中</em></div>
     </div>
 
     <div class="grid">
@@ -162,6 +164,7 @@ function statusText(st) { return { monitoring: '监测中', disposal: '处置中
 .stat.pos b{color:#66bb6a;}.stat.neu b{color:#90a4ae;}.stat.neg b{color:#ef5350;}.stat.warn b{color:#ffb300;}.stat.red b{color:#ef5350;}
 .stat.alarm b{color:#ffab91;}.stat.crisis b{color:#90caf9;}.stat.wo b{color:#80cbc4;}
 .stat.prop b{color:#80cbc4;}.stat.prop-out b{color:#ef5350;}
+.stat.report b{color:#a5d6a7;}.stat.report-draft b{color:#ce93d8;}
 .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;}
 @media(max-width:860px){.grid{grid-template-columns:1fr;}}
 .card{background:#0f1b38;border:1px solid rgba(120,160,220,0.16);border-radius:12px;padding:16px;}

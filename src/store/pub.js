@@ -21,6 +21,7 @@ export const usePubStore = defineStore('pub', {
     tab: 'dash',          // 当前页签（危机卡片可跳转协同工单）
     woDraftCrisis: null,  // 从危机卡片「拆分工单」带入的预填危机 id
     propCrisisFilter: null, // 从危机卡片跳转传播路径页带入的危机过滤
+    reportCrisisFilter: null, // 从结案档案跳转复盘页带入的危机过滤
     toast: null
   }),
   actions: {
@@ -191,6 +192,43 @@ export const usePubStore = defineStore('pub', {
       await this.load()
       this.msg(`已从传播路径拆分跨角色工单 #${r.id}`, 'success')
       return r
-    }
+    },
+    // ===== 危机复盘报告：编制、审核、版本归档与回滚 =====
+    async fetchReports(filter) { return await api('/reports', 'GET', null, filter) },
+    async fetchReport(id) { return (await api(`/reports/${id}`)).report },
+    async fetchReportAggregate(crisisId) { return (await api('/reports/aggregate', 'GET', null, { crisis_id: crisisId })).snapshot },
+    async fetchReportLiveAggregate(id) { return await api(`/reports/${id}/aggregate`, 'GET') },
+    async createReport(body) {
+      const r = await api('/reports', 'POST', body)
+      await this.load()
+      this.msg('复盘报告已创建，汇总数据已载入', 'success')
+      return r
+    },
+    async updateReport(id, body) { return await api(`/reports/${id}`, 'PUT', body) },
+    async refreshReport(id) { return await api(`/reports/${id}/refresh`, 'POST') },
+    async submitReport(id, body) {
+      const r = await api(`/reports/${id}/submit`, 'POST', body || {})
+      await this.load()
+      this.msg(`已送审并归档 V${r.version}`, 'success')
+      return r
+    },
+    async reviewReport(id, action, body) {
+      const r = await api(`/reports/${id}/review/${action}`, 'POST', body || {})
+      await this.load()
+      this.msg(action === 'approve' ? `审核通过，V${r.version} 已正式归档` : '审核意见已提交', action === 'approve' ? 'success' : 'info')
+      return r
+    },
+    async archiveReportVersion(id, body) {
+      const r = await api(`/reports/${id}/versions`, 'POST', body || {})
+      this.msg(`已手动归档 V${r.version}`, 'success')
+      return r
+    },
+    async rollbackReport(id, body) {
+      const r = await api(`/reports/${id}/rollback`, 'POST', body || {})
+      await this.load()
+      this.msg(`已回滚到 V${r.fromVersion}，生成修订版 V${r.version}`, 'success')
+      return r
+    },
+    async fetchReportVersion(id, version) { return (await api(`/reports/${id}/versions/${version}`, 'GET')).version }
   }
 })

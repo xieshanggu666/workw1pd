@@ -33,6 +33,9 @@
           <span v-if="c.prop_active" class="prop-badge" :class="{out:c.prop_outbreak}" @click="gotoProp(c)" title="查看关联的传播路径">
             🕸 传播路径 {{ c.prop_active }}{{ c.prop_outbreak ? ' · 🔥爆发 '+c.prop_outbreak : '' }}
           </span>
+          <span v-if="c.report_status" class="report-badge" :class="c.report_status" @click="gotoReport(c)">
+            📚 {{ reportStatusText(c.report_status) }}<template v-if="c.report_version"> V{{ c.report_version }}</template>
+          </span>
           <span class="st" :class="c.status">{{ stText(c.status) }}</span>
           <button class="del" @click="del(c)">✕</button>
         </div>
@@ -109,6 +112,9 @@
             <div v-for="cl in review.closures" :key="cl.id" class="rv-closure" :class="{rolled: cl.rolled_back}">
               <b>{{ cl.rolled_back ? '↩︎ 结案已回滚' : '✔ 结案' }}</b>
               <span class="cl-sum">{{ cl.summary || '（无总结）' }}</span>
+              <button v-if="cl.report_id" type="button" class="cl-report" @click="gotoReportById(c.id, cl.report_id)">
+                📚 {{ cl.report_status === 'approved' ? '复盘已归档' : cl.report_status === 'revision' ? '复盘修订中' : '查看复盘报告' }} V{{ cl.report_version }}
+              </button>
               <em>{{ cl.closed_at }}<template v-if="cl.rolled_back"> · 回滚于 {{ cl.rolled_back_at }}{{ cl.rollback_note ? '：' + cl.rollback_note : '' }}</template></em>
             </div>
           </div>
@@ -130,6 +136,7 @@
           <button class="ghost" @click="toggleReview(c)">{{ reviewId===c.id ? '收起回溯' : '🔍 回溯' }}</button>
           <button v-if="c.status!=='closed'" class="close" @click="toggleReview(c, true)">结案</button>
           <button v-else class="reopen" @click="reopen(c)">↩︎ 回滚结案</button>
+          <button class="report-btn" @click="gotoReport(c)">📚 复盘</button>
         </div>
       </div>
     </div>
@@ -183,6 +190,18 @@ function gotoProp(c) {
   store.propCrisisFilter = c.id
   store.tab = 'prop'
 }
+// 跳转危机复盘页；已有报告时按危机过滤，未编制时由复盘页选择结案事件
+function gotoReport(c) {
+  store.reportCrisisFilter = c.report_id ? { crisisId: c.id, reportId: c.report_id } : c.id
+  store.tab = 'reports'
+}
+function gotoReportById(crisisId, reportId) {
+  store.reportCrisisFilter = { crisisId, reportId }
+  store.tab = 'reports'
+}
+function reportStatusText(s) {
+  return { draft: '复盘编制中', in_review: '复盘待审核', changes_requested: '复盘待修改', rejected: '复盘已驳回', approved: '复盘已归档', revision: '复盘修订中' }[s] || s
+}
 // 跳转协同工单页并预填所属危机（页签状态在 store）
 function splitWorkOrder(c) {
   store.woDraftCrisis = c.id
@@ -228,6 +247,10 @@ textarea{resize:vertical;min-height:52px;}
 .wo-badge.open{background:#132a52;color:#bbdefb;border-color:rgba(66,165,245,.4);}
 .prop-badge{font-size:10px;padding:2px 8px;border-radius:6px;background:#0d2b28;color:#80cbc4;border:1px solid rgba(0,150,136,.3);cursor:pointer;}
 .prop-badge.out{background:#3a1a24;color:#ef9a9a;border-color:rgba(239,83,80,.45);}
+.report-badge{font-size:10px;padding:2px 8px;border-radius:6px;background:#221a38;color:#ce93d8;border:1px solid rgba(206,147,216,.35);cursor:pointer;}
+.report-badge.approved{background:#12261a;color:#a5d6a7;border-color:rgba(102,187,106,.35);}
+.report-badge.in_review{background:#3f3208;color:#ffe082;border-color:rgba(255,213,79,.3);}
+.report-badge.changes_requested,.report-badge.rejected{background:#3e2723;color:#ffcc80;border-color:rgba(255,152,0,.35);}
 .st{font-size:11px;padding:2px 10px;border-radius:6px;}
 .st.monitoring{background:#37474f;color:#b0bec5;}.st.disposal{background:#b71c1c;color:#ffcdd2;}.st.closed{background:#1b5e20;color:#a5d6a7;}
 .del{background:none;border:none;color:#ef5350;font-size:15px;cursor:pointer;}
@@ -282,6 +305,7 @@ h5{margin:0 0 8px;color:#ffd54f;font-size:12px;}
 .rv-closure{background:#13233f;border-radius:7px;padding:6px 9px;font-size:11px;color:#dbe4f3;display:flex;flex-direction:column;gap:2px;border-left:3px solid #66bb6a;}
 .rv-closure.rolled{border-left-color:#ffb300;opacity:.85;}
 .rv-closure .cl-sum{color:#8ba2c8;font-size:10px;}
+.rv-closure .cl-report{align-self:flex-start;background:#2a1d45;border:1px solid rgba(206,147,216,.35);color:#ce93d8;border-radius:5px;padding:2px 7px;font-size:10px;cursor:pointer;}
 .rv-closure em{color:#5b6f94;font-size:10px;font-style:normal;}
 .rv-none{color:#5b6f94;font-size:11px;text-align:center;padding:8px 0;}
 .close-box{border-top:1px dashed rgba(120,160,220,0.15);padding-top:10px;display:flex;flex-direction:column;gap:8px;}
@@ -292,6 +316,7 @@ h5{margin:0 0 8px;color:#ffd54f;font-size:12px;}
 .actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;}
 .prog{background:linear-gradient(135deg,#ef6c00,#e65100);border:none;color:#fff;font-weight:600;cursor:pointer;}
 .wo-btn{background:linear-gradient(135deg,#00897b,#00695c);border:none;color:#fff;font-weight:600;cursor:pointer;}
+.report-btn{background:linear-gradient(135deg,#7b1fa2,#4a148c);border:none;color:#fff;font-weight:600;cursor:pointer;}
 .close{background:linear-gradient(135deg,#2e7d32,#1b5e20);border:none;color:#fff;font-weight:600;cursor:pointer;}
 .reopen{background:linear-gradient(135deg,#f9a825,#f57f17);border:none;color:#fff;font-weight:600;cursor:pointer;}
 .none{color:#5b6f94;text-align:center;padding:40px;}

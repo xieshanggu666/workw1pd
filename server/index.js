@@ -32,6 +32,12 @@ import {
   attachAlert, detachAlert, addEdge, createPropWorkOrder, markDecline,
   deleteProp, bindPropHooks, onAlertEvent
 } from './propagate.js'
+import {
+  REPORT_STATUS, listReports, reportSummary, getReport, getReportVersion,
+  createReport, updateReport, submitReport, reviewReport,
+  archiveReportVersion, rollbackReportVersion, refreshReportSnapshot,
+  buildSnapshot, reportLogs, seedReports, syncActiveClosureReports
+} from './reports.js'
 
 const app = express()
 app.use(express.json({ limit: '5mb' })) // 大批量导入（上限 5000 条）
@@ -65,6 +71,10 @@ bindPropHooks({
 bindPipelineProp({ onAlertEvent })
 const seededProp = seedPropNotifyTasks()
 if (seededProp) console.log(`[PROP] 为存量爆发期传播路径生成 ${seededProp} 个通知任务`)
+// 老库/结案反复回滚后，重新对齐有效结案档案与最新复盘报告状态（总览和覆盖率同源）
+syncActiveClosureReports()
+const seededReports = seedReports()
+if (seededReports) console.log(`[REPORT] 已生成 ${seededReports} 份演示复盘报告`)
 
 // 危机列表（含来源规则、承接规则、未解除预警数、协同工单统计、时间线）
 function crisisList(withTimeline = false) {
@@ -73,7 +83,10 @@ function crisisList(withTimeline = false) {
     (SELECT COUNT(*) FROM work_orders wo WHERE wo.crisis_id=c.id AND wo.status IN ('todo','doing','blocked')) wo_open,
     (SELECT COUNT(*) FROM work_orders wo WHERE wo.crisis_id=c.id) wo_total,
     (SELECT COUNT(*) FROM prop_paths pp WHERE pp.crisis_id=c.id AND pp.status='active') prop_active,
-    (SELECT COUNT(*) FROM prop_paths pp WHERE pp.crisis_id=c.id AND pp.stage='outbreak' AND pp.status='active') prop_outbreak
+    (SELECT COUNT(*) FROM prop_paths pp WHERE pp.crisis_id=c.id AND pp.stage='outbreak' AND pp.status='active') prop_outbreak,
+    (SELECT cc.report_status FROM crisis_closures cc WHERE cc.crisis_id=c.id AND cc.rolled_back=0 ORDER BY cc.id DESC LIMIT 1) report_status,
+    (SELECT cc.report_id FROM crisis_closures cc WHERE cc.crisis_id=c.id AND cc.rolled_back=0 ORDER BY cc.id DESC LIMIT 1) report_id,
+    (SELECT cc.report_version FROM crisis_closures cc WHERE cc.crisis_id=c.id AND cc.rolled_back=0 ORDER BY cc.id DESC LIMIT 1) report_version
     FROM crisis c LEFT JOIN alerts a ON a.id=c.alert_id ORDER BY c.id DESC`)
   return list.map((c) => {
     const rules = q(`SELECT ca.alert_id, ca.is_origin, ca.first_at, ca.last_at, al.title alert_title, al.level alert_level
@@ -104,6 +117,7 @@ app.get('/api/state', (req, res) => {
     (SELECT COUNT(*) FROM work_orders WHERE status IN ('todo','doing') AND due_at IS NOT NULL AND due_at<?) workOverdue,
     (SELECT COUNT(*) FROM prop_paths WHERE stage='outbreak' AND status='active') propOutbreak,
     (SELECT COUNT(*) FROM prop_paths WHERE status='active') propActive`, Date.now())
+  const reportStats = reportSummary()
   // 热度趋势（近7时段）
   const nowH = new Date().getHours()
   const trend = []
@@ -116,7 +130,10 @@ app.get('/api/state', (req, res) => {
   }
   res.json({
     sources, hotWords: hot, activeAlerts, crises,
-    stats: { ...statsSummary(posts), ...loop },
+    stats: { ...statsSummary(posts), ...loop, report: reportStats,
+      reportDrafts: reportStats.openDrafts,
+      reportApproved: reportStats.approved,
+      reportCoverageRate: reportStats.coverageRate },
     trend
   })
 })
@@ -411,8 +428,11 @@ app.get('/api/crisis/:id/review', (req, res) => {
     WHERE ca.crisis_id=? ORDER BY ca.is_origin DESC, ca.alert_id`, c.id)
   // 结案档案（含已回滚）：回溯面板展示结案/回滚历史
   const closures = q('SELECT * FROM crisis_closures WHERE crisis_id=? ORDER BY id DESC', c.id)
+  const reports = q(`SELECT r.id,r.title,r.status,r.current_version,r.latest_version,r.updated,r.approved_at,r.rollback_from_version,
+    r.created_by,r.submitted_by,r.reviewer,r.approved_by
+    FROM crisis_reports r WHERE r.crisis_id=? ORDER BY r.id DESC`, c.id)
   res.json({
-    crisis: c, timeline, events, rules, closures,
+    crisis, timeline, events, rules, closures, reports,
     stats: {
       triggers: events.length,
       open,
@@ -502,6 +522,13 @@ app.delete('/api/crisis/:id', (req, res) => {
   run('UPDATE alert_events SET crisis_id=NULL WHERE crisis_id=?', req.params.id)
   run('DELETE FROM crisis_timeline WHERE crisis_id=?', req.params.id)
   run('DELETE FROM crisis_closures WHERE crisis_id=?', req.params.id)
+  // 复盘报告及其版本/留痕随事件删除（结案档案删除时报告失去关联）
+  const reportIds = q('SELECT id FROM crisis_reports WHERE crisis_id=?', req.params.id).map((r) => r.id)
+  for (const rid of reportIds) {
+    run('DELETE FROM crisis_report_versions WHERE report_id=?', rid)
+    run('DELETE FROM crisis_report_logs WHERE report_id=?', rid)
+  }
+  run('DELETE FROM crisis_reports WHERE crisis_id=?', req.params.id)
   // 协同工单随事件删除（工单日志一并清理）
   const woIds = q('SELECT id FROM work_orders WHERE crisis_id=?', req.params.id).map((r) => r.id)
   for (const wid of woIds) run('DELETE FROM work_order_logs WHERE wo_id=?', wid)
@@ -854,6 +881,72 @@ app.get('/api/collect/runs', (req, res) => {
     })
   })
 })
+
+// ===== 危机复盘报告：汇总、跨角色编制、审核、版本归档与回滚 =====
+// viewer 只读；ops 值班员可编制/送审/手动归档/版本回滚；admin 管理员负责审核归档
+app.get('/api/reports', (req, res) => {
+  res.json({
+    items: listReports({
+      status: String(req.query.status || ''),
+      crisisId: req.query.crisis_id ? +req.query.crisis_id : '',
+      scope: req.query.scope === 'all' ? 'all' : 'active'
+    }),
+    summary: reportSummary(),
+    dict: { status: REPORT_STATUS }
+  })
+})
+app.get('/api/reports/aggregate', (req, res) => {
+  const crisisId = +req.query.crisis_id
+  if (!crisisId) return res.status(400).json({ error: 'crisis_id 必填' })
+  const snapshot = buildSnapshot(crisisId)
+  if (!snapshot) return res.status(404).json({ error: '危机事件不存在' })
+  res.json({ snapshot })
+})
+app.get('/api/reports/:id', (req, res) => {
+  const report = getReport(+req.params.id)
+  if (!report) return res.status(404).json({ error: '复盘报告不存在' })
+  res.json({ report })
+})
+app.get('/api/reports/:id/aggregate', (req, res) => {
+  const report = getReport(+req.params.id)
+  if (!report) return res.status(404).json({ error: '复盘报告不存在' })
+  res.json({ snapshot: buildSnapshot(report.crisis_id), frozenSnapshot: report.snapshot })
+})
+app.get('/api/reports/:id/versions/:version', (req, res) => {
+  const v = getReportVersion(+req.params.id, +req.params.version)
+  if (!v) return res.status(404).json({ error: '报告版本不存在' })
+  res.json({ version: { ...v, sections: JSON.parse(v.sections_json || '{}'), snapshot: JSON.parse(v.snapshot_json || '{}') } })
+})
+app.get('/api/reports/:id/logs', (req, res) => {
+  if (!getReport(+req.params.id)) return res.status(404).json({ error: '复盘报告不存在' })
+  res.json({ logs: reportLogs(+req.params.id) })
+})
+function reportAction(handler, code = 400) {
+  return (req, res) => {
+    const r = handler(+req.params.id, req.body || {}, req.actor)
+    if (r === null || r === undefined) return res.status(404).json({ error: '复盘报告不存在' })
+    if (r.error) return res.status(code).json({ error: r.error })
+    res.json(r)
+  }
+}
+app.post('/api/reports', guard('ops'), (req, res) => {
+  const r = createReport(req.body || {}, req.actor)
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.status(201).json(r)
+})
+app.put('/api/reports/:id', guard('ops'), reportAction(updateReport))
+app.post('/api/reports/:id/refresh', guard('ops'), reportAction(refreshReportSnapshot))
+app.post('/api/reports/:id/versions', guard('ops'), reportAction(archiveReportVersion))
+app.post('/api/reports/:id/submit', guard('ops'), reportAction(submitReport))
+app.post('/api/reports/:id/review/:action', guard('admin'), (req, res) => {
+  const action = String(req.params.action || '')
+  if (!['approve', 'changes', 'reject'].includes(action)) return res.status(400).json({ error: '审核动作非法' })
+  const r = reviewReport(+req.params.id, action, req.body || {}, req.actor)
+  if (r === null || r === undefined) return res.status(404).json({ error: '复盘报告不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+app.post('/api/reports/:id/rollback', guard('ops'), reportAction(rollbackReport))
 
 const PORT = Number(process.env.PORT) || 4130
 app.listen(PORT, () => console.log(`[PUBMON] API running at http://localhost:${PORT}`))

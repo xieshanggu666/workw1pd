@@ -27,6 +27,16 @@ npm run dev
 - **协同工单**：从危机**拆分跨角色工单**（公关/法务/运营/客服/协调组），指派/认领、状态流转（待分派→处理中→已完成，可阻塞/取消/回退打回重做）、**SLA 两级超时升级**（阻塞挂起计时、恢复顺延）；完成结果**回写危机时间线并可联动解除预警**，联动通知调度与权限控制，**未完结工单阻塞危机结案**
 - **舆情传播路径分析**：沉淀话题的**来源、传播节点、转发关系与影响阶段**（潜伏期→发酵期→爆发期，可标记回落/二次爆发），节点/KOL/热度/触达/传播层级实时聚合；**关联预警规则与危机事件**（按话题/规则自动挂接），按传播变化（爆发升级/热度激增/KOL 加入）**触发通知**，爆发期可**自动生成跨角色处置工单**，全程变化留痕并回写危机统一时间线
 - **通知中心**：多渠道订阅与通知编排——按预警规则/话题/危机状态/**协同工单事件（拆分分派/超时升级）/传播路径事件（爆发升级/异动激增·KOL）**生成**可暂停**的通知任务，调度器自动发送、失败退避重试、回执超时自动升级；确认回执**同步解除关联预警并写入危机时间线**；覆盖渠道与订阅配置、调度、角色权限与全程历史追踪
+- **危机复盘报告**：仅在危机结案后发起，自动汇总预警触发、统一时间线、传播路径、跨角色工单与通知回执；支持值班员/管理员跨角色编制、管理员审核（通过归档/退回修改/驳回）、手动版本归档、送审版/正式版不可变留痕、历史版本回滚生成修订版；审核状态与版本同步回写有效结案档案、总览统计和结案复盘覆盖率
+
+## 危机复盘报告
+
+- **统一汇总**：报告以危机事件为单位拉取承接规则、预警触发及解除途径、关联舆情、统一时间线、结案档案、传播路径（节点/KOL/层级/峰值热度/触达/关键转发边）、跨角色工单（状态/团队/SLA/结果）和通知任务（发送/升级/回执/回执人）。编制过程中可手动重新汇总，提交或审核归档时冻结完整快照，保证后续统计与结案档案可追溯
+- **跨角色流程**：`viewer` 只读；`ops` 值班员和 `admin` 管理员可创建、编辑、保存、送审、手动归档与回滚；仅 `admin` 可执行审核通过、退回修改和驳回。送审前校验复盘概述与改进措施，审核意见与操作人全程留痕
+- **状态机**：编制中 `draft` → 待审核 `in_review` → 已归档 `approved`；待审核可退回为 `changes_requested` 或驳回 `rejected`（驳回后仍可修改并重新送审）；已归档报告回滚历史版本后进入修订中 `revision`，可再次编辑并提交审核
+- **版本归档与回滚**：送审、手动归档、审核通过均写入 `crisis_report_versions` 不可变版本；回滚不覆盖历史版本，而是复制目标版本内容并生成新的修订版本，同时标记原版本恢复采用记录
+- **结案档案与统计回写**：有效（未回滚）结案档案记录 `report_id/report_version/report_status`；危机列表、事件回溯和 `/api/state` 同源展示。总览统计新增复盘编制中、已归档、历史版本数、结案档案覆盖率（已结案且有效档案为 approved 的事件占比）；危机结案回滚或事件删除时同步清理关联状态/报告数据
+- 主要接口：`GET /api/reports`、`POST /api/reports`、`GET /api/reports/:id`、`PUT /api/reports/:id`、`POST /api/reports/:id/refresh`、`POST /api/reports/:id/versions`、`POST /api/reports/:id/submit`、`POST /api/reports/:id/review/{approve|changes|reject}`、`POST /api/reports/:id/rollback`、`GET /api/reports/aggregate?crisis_id=`、`GET /api/reports/:id/versions/:version`
 
 ## 跨角色危机协同工单
 
@@ -101,7 +111,7 @@ npm run dev
 
 ## 数据库表
 
-`sources` `posts`（含 `idem_key` 幂等键） `hot_words` `alerts` `alert_events`（含 `resolve_kind` 解除途径：manual/batch/close/notify） `crisis` `crisis_alerts` `crisis_timeline` `crisis_closures`（结案档案：联动解除清单、结案前状态、回滚记录） `import_jobs` `import_job_items`（可恢复导入任务与逐条记录） `notify_channels`（通知渠道） `notify_subs`（订阅编排：规则/话题/危机状态/工单事件 + 多渠道 + 回执与升级策略） `notify_tasks`（通知任务：幂等键、状态机、重试/回执/升级字段、工单来源 `work_order_id/wo_event`） `notify_logs`（历史追踪：全程留痕含操作人） `collect_sources`（数据源连接：类型/地址/入库渠道/调度策略 + 游标/连续失败计数/累计统计） `collect_runs`（采集运行记录：抓取/入库/去重/预警/建档与游标推进留痕） `work_orders`（协同工单：状态机/处理人与职能团队/SLA 截止/两级升级/阻塞挂起/处理结果/联动解除标记/来源传播路径 `prop_path_id`） `work_order_logs`（工单全程留痕：拆分/指派/认领/流转/阻塞/恢复/升级/回退/完成/取消，含操作人与职能团队） `prop_paths`（传播路径：话题/影响阶段/来源舆情/关联危机与来源预警/峰值热度/爆发与自动工单时间戳） `prop_nodes`（传播节点：首发来源/媒体/KOL/普通节点，路径内同名幂等） `prop_edges`（转发关系：from→to/互动量/触达/热度/对应舆情/幂等键） `prop_path_alerts`（路径↔预警规则多对多，含来源标记） `prop_change_logs`（传播变化留痕：建档/转发/阶段推进/关联/回落/自动工单，含操作人）；`notify_subs` 增 `prop_event`、`notify_tasks` 增 `prop_path_id`（传播事件订阅与任务来源）
+`sources` `posts`（含 `idem_key` 幂等键） `hot_words` `alerts` `alert_events`（含 `resolve_kind` 解除途径：manual/batch/close/notify） `crisis` `crisis_alerts` `crisis_timeline` `crisis_closures`（结案档案：联动解除清单、结案前状态、回滚记录） `import_jobs` `import_job_items`（可恢复导入任务与逐条记录） `notify_channels`（通知渠道） `notify_subs`（订阅编排：规则/话题/危机状态/工单事件 + 多渠道 + 回执与升级策略） `notify_tasks`（通知任务：幂等键、状态机、重试/回执/升级字段、工单来源 `work_order_id/wo_event`） `notify_logs`（历史追踪：全程留痕含操作人） `collect_sources`（数据源连接：类型/地址/入库渠道/调度策略 + 游标/连续失败计数/累计统计） `collect_runs`（采集运行记录：抓取/入库/去重/预警/建档与游标推进留痕） `work_orders`（协同工单：状态机/处理人与职能团队/SLA 截止/两级升级/阻塞挂起/处理结果/联动解除标记/来源传播路径 `prop_path_id`） `work_order_logs`（工单全程留痕：拆分/指派/认领/流转/阻塞/恢复/升级/回退/完成/取消，含操作人与职能团队） `prop_paths`（传播路径：话题/影响阶段/来源舆情/关联危机与来源预警/峰值热度/爆发与自动工单时间戳） `prop_nodes`（传播节点：首发来源/媒体/KOL/普通节点，路径内同名幂等） `prop_edges`（转发关系：from→to/互动量/触达/热度/对应舆情/幂等键） `prop_path_alerts`（路径↔预警规则多对多，含来源标记） `prop_change_logs`（传播变化留痕：建档/转发/阶段推进/关联/回落/自动工单，含操作人）；`notify_subs` 增 `prop_event`、`notify_tasks` 增 `prop_path_id`（传播事件订阅与任务来源）；`crisis_closures` 增 `report_id/report_version/report_status`（复盘报告状态回写结案档案）、`crisis_reports`（危机复盘报告主表：跨角色编制/审核/当前版本与冻结汇总快照）、`crisis_report_versions`（不可变报告版本：手动归档/送审/审核/回滚来源）、`crisis_report_logs`（报告编制、审核、归档与回滚留痕）
 
 > 旧库自动迁移：新增 `alerts.merge_topic/merge_window`、`crisis.topic/last_trigger_at` 列，并把旧的 `crisis.alert_id` 单规则关联迁移到多对多表 `crisis_alerts`（回填话题与最近触发时间），历史时间线原样保留；新增 `posts.idem_key` 列与索引（索引在补列之后创建，更早期无该列的库也可启动），并自动重建早期版本的 `import_job_items.idem_key` 唯一约束为普通索引（支持跨任务同名幂等键）；新增 `alert_events.resolve_kind` 列与 `crisis_closures` 结案档案表，并为历史已结案事件从时间线「事件结案」记录补建结案档案（联动解除清单无法追溯置空，此类结案回滚时仅恢复事件状态）。
 
